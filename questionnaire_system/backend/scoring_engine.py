@@ -61,6 +61,12 @@ class ScoringEngine:
         elif rule == ScoringRule.VOTE_RANK_STATIC.value:
             return self._vote_rank_static_score(question_id, answer, question_config)
             
+        elif rule == ScoringRule.STATIC_MAPPING.value:
+            return self._static_mapping_score(answer, question_config)
+
+        elif rule == ScoringRule.CONDITIONAL_RANK.value:
+            return self._conditional_rank_score(question_id, answer, question_config)
+
         return 0
     
     def _static_weight_score(self, answer: str, config: Dict[str, Any]) -> float:
@@ -68,24 +74,39 @@ class ScoringEngine:
         weights = config.get("weights", {})
         return weights.get(answer, 0)
     
-    def _real_time_rank_score(self, question_id: str, answer: float, 
+    def _real_time_rank_score(self, question_id: str, answer: Any, 
                               config: Dict[str, Any]) -> float:
         """实时排名评分"""
+        try:
+            user_answer_float = float(answer)
+        except (ValueError, TypeError):
+            return 0.0
+
         all_answers = self.redis_manager.get_question_answers(question_id)
-        values = [float(a["answer"]) for a in all_answers if isinstance(a["answer"], (int, float))]
         
+        values = []
+        for a in all_answers:
+            try:
+                values.append(float(a["answer"]))
+            except (ValueError, TypeError):
+                continue
+
         if not values:
             return config["range"][1]  # 第一个回答者得满分
             
         # 排序并计算排名
         values.sort(reverse=True)
-        rank = values.index(float(answer)) + 1 if float(answer) in values else len(values) + 1
+        rank = values.index(user_answer_float) + 1 if user_answer_float in values else len(values) + 1
         
         # 线性映射到指定范围
         min_score, max_score = config["range"]
         if len(values) == 1:
             return max_score
         
+        # Avoid division by zero if all valid answers are the same
+        if len(set(values)) == 1:
+            return max_score
+
         score = max_score - (rank - 1) * (max_score - min_score) / (len(values) - 1)
         return round(score, 3)
     
@@ -227,6 +248,71 @@ class ScoringEngine:
             return scores[rank - 1]
         return 0
 
+    def _static_mapping_score(self, answer: int, config: Dict[str, Any]) -> float:
+        """静态映射评分"""
+        # Ensure answer is an int for mapping lookup
+        answer = int(answer)
+        return config.get("mapping", {}).get(answer, 0)
+
+    def _conditional_rank_score(self, question_id: str, answer: Any,
+                                config: Dict[str, Any]) -> float:
+        """条件排名评分"""
+        try:
+            user_value = float(answer)
+        except (ValueError, TypeError):
+            return 0.0
+
+        all_answers = self.redis_manager.get_question_answers(question_id)
+        
+        values = {}
+        for a in all_answers:
+            try:
+                values[a["user_id"]] = float(a["answer"])
+            except (ValueError, TypeError):
+                continue
+
+        if not values:
+            return config["range"][1]
+
+        # Determine ranking direction based on the question
+        reverse_rank = False
+        if question_id == 'f':
+            # For 'f', check the distribution of 'a1' answers
+            a1_answers = self.redis_manager.get_question_answers("a1")
+            a1_values = [a["answer"] for a in a1_answers]
+            y_count = a1_values.count("Y")
+            n_count = a1_values.count("N")
+            if n_count > y_count:
+                reverse_rank = True
+        elif question_id == 'l':
+            # For 'l', check the distribution of its own answers
+            l_values = values.values()
+            zero_count = sum(1 for v in l_values if v == 0)
+            non_zero_count = len(l_values) - zero_count
+            if zero_count > non_zero_count:
+                reverse_rank = True
+
+        # Sort values by score (ascending by default)
+        sorted_values = sorted(values.items(), key=lambda item: item[1], reverse=reverse_rank)
+        
+        # Find user's rank
+        rank = -1
+        for i, (user, score) in enumerate(sorted_values):
+            if score == user_value:
+                rank = i + 1
+                break
+        
+        if rank == -1: # Should not happen if user is in values
+            rank = len(sorted_values) + 1
+
+        # Linear mapping
+        min_score, max_score = config["range"]
+        if len(sorted_values) == 1:
+            return max_score
+            
+        score = max_score - (rank - 1) * (max_score - min_score) / (len(sorted_values) - 1)
+        return round(score, 3)
+
     def calculate_axes_scores(self, user_id: str):
         """计算用户的X, Y轴得分"""
         scores = self.redis_manager.get_user_scores(user_id)
@@ -244,23 +330,27 @@ class ScoringEngine:
         elif b1_answer == "NN":
             raw_x += scores.get("b5", 0)
         
-        # Y-axis: 精神重庆人
-        # Assuming D1%, L%, etc. are all 100%
-        y_keys = ["f", "g", "h1", "h2", "h3", "i", "j", "k"] # Base keys for Y-axis
-        raw_y = sum(scores.get(k, 0) for k in y_keys)
-        
-        # Add score based on the game chosen in 'r'
-        game_choice = answers.get("r", {}).get("answer")
-        if game_choice == "打脏话牌": # Corresponds to question l
-            raw_y += scores.get("l", 0)
-        elif game_choice == "火锅油碟": # Corresponds to question m
-            raw_y += scores.get("m", 0)
-        elif game_choice == "打麻将": # Corresponds to question n
-            raw_y += scores.get("n", 0)
-        elif game_choice == "量身高": # Corresponds to questions o1-o5
-            o_keys = ["o1", "o2", "o3", "o4", "o5"]
-            raw_y += sum(scores.get(k, 0) for k in o_keys)
+        # Y-axis: 精神重庆人 (weighted)
+        # 1. Get weights from question 'd' distribution
+        d_answers = self.redis_manager.get_question_answers("d")
+        total_d = len(d_answers)
+        w_d1, w_d2, w_d3 = 0, 0, 0
+        if total_d > 0:
+            d_counts = Counter(a["answer"] for a in d_answers)
+            w_d1 = d_counts.get("区县", 0) / total_d
+            w_d2 = d_counts.get("直辖", 0) / total_d
+            w_d3 = d_counts.get("素养", 0) / total_d
 
+        # 2. Calculate score for each dimension
+        score_h1 = scores.get("h1", 0) # 区县
+        score_h2 = scores.get("h2", 0) # 直辖
+        
+        suyang_keys = ["f", "g", "j", "k", "l", "m", "n", "o1", "o2", "o3", "o4", "o5"]
+        score_suyang = sum(scores.get(k, 0) for k in suyang_keys)
+
+        # 3. Calculate final weighted Y score
+        raw_y = (w_d1 * score_h1) + (w_d2 * score_h2) + (w_d3 * score_suyang)
+        
         self.redis_manager.save_user_raw_axes(user_id, raw_x, raw_y)
         return raw_x, raw_y
 

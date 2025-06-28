@@ -4,6 +4,8 @@ from typing import Dict, Any, Tuple, List
 import numpy as np
 import sys
 import os
+from collections import Counter
+import json
 
 # Add project root to path to allow importing from backend
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -30,7 +32,10 @@ class DistributionResponse(BaseModel):
     question_id: str
     label: str
     total_respondents: int
-    distribution: Dict[str, str]
+    distribution: Dict[str, Any]
+
+class AllQuestionsResponse(BaseModel):
+    questions: Dict[str, str]
 
 # --- Dependencies ---
 def get_scoring_engine():
@@ -71,8 +76,8 @@ def get_user_score(user_id: str):
 def get_question_distribution(question_id: str):
     """
     Retrieves the answer distribution for a given question.
-    The distribution is returned as a dictionary where keys are the
-    answer options and values are their percentage representation.
+    - For SINGLE_CHOICE and COMBINATION questions, it returns the percentage for each option.
+    - For TEXT, NUMBER, and other types, it returns the count for each unique answer.
     """
     redis = get_redis_manager()
     
@@ -80,36 +85,57 @@ def get_question_distribution(question_id: str):
         raise HTTPException(status_code=404, detail="Question not found")
         
     question_config = QUESTIONS[question_id]
-    stats = redis.get_question_stats(question_id)
-    total_respondents = redis.get_question_respondent_count(question_id)
+    all_answers_data = redis.get_question_answers(question_id)
+    total_respondents = len(all_answers_data)
+    
+    # Convert all answers to a hashable type (string) to be used in Counter
+    stringified_answers = [json.dumps(a['answer'], sort_keys=True) for a in all_answers_data]
+    answers = [a['answer'] for a in all_answers_data]
 
     distribution = {}
     if total_respondents > 0:
-        if question_config['type'] in [QuestionType.SINGLE_CHOICE.value, QuestionType.COMBINATION.value]:
-            vote_counts = {}
-            prefix = "option:" if question_config['type'] == QuestionType.SINGLE_CHOICE.value else "combo:"
-            
+        q_type = question_config.get('type')
+
+        if q_type == QuestionType.SINGLE_CHOICE.value:
+            counts = Counter(answers)
             options = question_config.get('options', [])
-            if question_config['type'] == QuestionType.COMBINATION.value:
-                # For combination, we discover options from stats
-                options = [k.replace(prefix, "") for k in stats if k.startswith(prefix)]
-
             for option in options:
-                count = int(stats.get(f"{prefix}{option}", 0))
-                vote_counts[option] = count
-
-            for option, count in vote_counts.items():
+                count = counts.get(option, 0)
                 percentage = (count / total_respondents) * 100
                 distribution[option] = f"{percentage:.2f}%"
-        else:
-            distribution["error"] = "Distribution for this question type is not supported via this endpoint."
-    
+        
+        elif q_type == QuestionType.COMBINATION.value:
+            # For combinations, we treat each unique combination as an option
+            # Answers are lists, so we sort them to ensure consistent representation
+            flat_list = [",".join(sorted(ans)) for ans in answers if isinstance(ans, list)]
+            counts = Counter(flat_list)
+            for combo, count in counts.items():
+                percentage = (count / total_respondents) * 100
+                distribution[combo] = f"{percentage:.2f}%"
+
+        else: # For TEXT, NUMBER, etc.
+            # Use the stringified list for counting to handle potential unhashable types
+            counts = Counter(stringified_answers)
+            # Create a user-friendly distribution dict
+            for stringified_answer, count in counts.items():
+                # Convert the string back to its original Python object for the response key
+                original_answer = json.loads(stringified_answer)
+                # Ensure the key is a string for the Pydantic model
+                distribution[str(original_answer)] = count
+
     return {
         "question_id": question_id,
         "label": question_config['label'],
         "total_respondents": total_respondents,
         "distribution": distribution,
     }
+
+@app.get("/questions", response_model=AllQuestionsResponse)
+def get_all_questions():
+    """
+    Retrieves a list of all available question IDs and their labels.
+    """
+    return {"questions": {qid: qconfig['label'] for qid, qconfig in QUESTIONS.items()}}
 
 @app.get("/")
 def read_root():

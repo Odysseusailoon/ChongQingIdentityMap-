@@ -75,16 +75,14 @@ else:
         user_answers = redis_manager.get_user_answers(st.session_state.user_id)
         
         # 定义章节问题
-        chapter1_keys = ["q1", "q2", "p", "a1", "a2", "b1", "b2", "b3", "b4", "b5", "c1", "c2", "c3", "e"]
-        chapter3_keys = ["r"]
-        chapter2_keys = [k for k in QUESTIONS.keys() if k not in chapter1_keys and k not in chapter3_keys]
+        chapter1_keys = ["q1", "q2", "p", "a1", "a2", "b1", "b2", "b3", "b4", "b5", "d", "c1", "c2", "c3", "e"]
+        chapter2_keys = [k for k in QUESTIONS.keys() if k not in chapter1_keys]
 
         chapter1_questions = {k: QUESTIONS[k] for k in chapter1_keys if k in QUESTIONS}
         chapter2_questions = {k: QUESTIONS[k] for k in chapter2_keys if k in QUESTIONS}
-        chapter3_questions = {k: QUESTIONS[k] for k in chapter3_keys if k in QUESTIONS}
 
         # 创建选项卡
-        tab1, tab2, tab3 = st.tabs(["Chapter 1", "Chapter 2", "Chapter 3"])
+        tab1, tab2 = st.tabs(["Chapter 1", "Chapter 2"])
 
         with st.form("questionnaire_form"):
             answers = {}
@@ -255,21 +253,6 @@ else:
                         answers[question_id] = selected
                     
                     st.divider()
-
-            with tab3:
-                st.header("Chapter 3")
-                for question_id, question in chapter3_questions.items():
-                    st.subheader(f"{question_id}. {question['label']}")
-                    existing_answer = user_answers.get(question_id, {}).get("answer")
-                    
-                    if question['type'] == QuestionType.SINGLE_CHOICE.value:
-                        answer = st.radio(
-                            "请选择",
-                            question['options'],
-                            key=f"q_{question_id}",
-                            index=question['options'].index(existing_answer) if existing_answer in question['options'] else 0
-                        )
-                        answers[question_id] = answer
 
             # 提交按钮
             submitted = st.form_submit_button("提交所有答案", type="primary")

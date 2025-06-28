@@ -11,6 +11,27 @@ fi
 echo "Installing dependencies..."
 pip install -r requirements.txt
 
-# 启动Streamlit应用
-echo "Starting Streamlit app..."
-streamlit run app.py --server.port 8501 --server.address 0.0.0.0 
+# Function to clean up background processes on exit
+cleanup() {
+    echo "Shutting down servers..."
+    kill $STREAMLIT_PID
+    kill $FASTAPI_PID
+    exit
+}
+
+# Trap script exit signals and call cleanup
+trap cleanup SIGINT SIGTERM
+
+# 启动 Streamlit 应用
+echo "Starting Streamlit app on port 8501..."
+streamlit run app.py --server.port 8501 &
+STREAMLIT_PID=$!
+
+# 启动 FastAPI 应用
+echo "Starting FastAPI app on port 8000..."
+uvicorn api.main:app --host 0.0.0.0 --port 8000 &
+FASTAPI_PID=$!
+
+# Wait for both processes to complete
+wait $STREAMLIT_PID
+wait $FASTAPI_PID 

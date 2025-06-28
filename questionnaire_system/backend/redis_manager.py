@@ -191,6 +191,19 @@ class RedisManager:
         data = self.redis_client.hgetall(key)
         return float(data.get("x", 0)), float(data.get("y", 0))
 
+    def get_all_user_final_axes(self) -> List[Dict[str, float]]:
+        """获取所有用户的最终轴得分"""
+        all_scores = []
+        for key in self.redis_client.scan_iter("user:axes:final:*"):
+            data = self.redis_client.hgetall(key)
+            if "x" in data and "y" in data:
+                all_scores.append({"x": float(data["x"]), "y": float(data["y"])})
+        return all_scores
+
+    def get_question_respondent_count(self, question_id: str) -> int:
+        """获取问题的回答者总数"""
+        return self.redis_client.scard(f"question:respondents:{question_id}")
+
     def clear_all_data(self):
         """清空所有数据（谨慎使用）"""
         self.redis_client.flushdb()

@@ -329,6 +329,16 @@ class ScoringEngine:
         
         return score_data
     
+    def get_average_axes_scores(self) -> Tuple[float, float]:
+        """计算所有用户的平均坐标"""
+        all_final_axes = self.redis_manager.get_all_user_final_axes()
+        if not all_final_axes:
+            return 0, 0
+        
+        avg_x = np.mean([s['x'] for s in all_final_axes])
+        avg_y = np.mean([s['y'] for s in all_final_axes])
+        return avg_x, avg_y
+
     def recalculate_all_scores(self):
         """重新计算所有用户的得分（用于距离评分等需要全局信息的题目）"""
         all_users = self.redis_manager.get_all_users()
